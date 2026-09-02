@@ -2,6 +2,7 @@
 
 namespace PHPStan\Dependency;
 
+use PhpParser\Comment\Doc;
 use PhpParser\Node;
 use PhpParser\Node\Expr\Array_;
 use PhpParser\Node\Expr\ArrayDimFetch;
@@ -35,6 +36,7 @@ use function array_key_exists;
 use function array_merge;
 use function count;
 use function in_array;
+use function str_contains;
 
 #[AutowiredService]
 final class DependencyResolver
@@ -55,6 +57,10 @@ final class DependencyResolver
 	public function resolveDependencies(Node $node, Scope $scope): NodeDependencies
 	{
 		$dependenciesReflections = [];
+
+		if ($node instanceof Node\Stmt) {
+			$this->extractStmtVarTags($node, $scope, $dependenciesReflections);
+		}
 
 		if ($node instanceof Node\Stmt\Class_) {
 			if (isset($node->namespacedName)) {
@@ -528,6 +534,46 @@ final class DependencyResolver
 
 		$itemType = $scope->getType($items[0]->value);
 		return $itemType->isClassString()->yes();
+	}
+
+	/**
+	 * Extracts the classes referenced from a variable-level var-tag PHPDoc attached to a statement.
+	 *
+	 * @param array<int, ClassReflection|FunctionReflection|ConstantReflection> $dependenciesReflections
+	 */
+	private function extractStmtVarTags(Node\Stmt $stmt, Scope $scope, array &$dependenciesReflections): void
+	{
+		$comments = $stmt->getComments();
+		if (count($comments) === 0) {
+			return;
+		}
+
+		$function = $scope->getFunction();
+		foreach ($comments as $comment) {
+			if (!$comment instanceof Doc) {
+				continue;
+			}
+
+			// Cheap pre-filter so that resolving a PHPDoc block is only paid for
+			// by the statements that can possibly carry a @var/@phpstan-var/@psalm-var tag.
+			if (!str_contains($comment->getText(), 'var')) {
+				continue;
+			}
+
+			$resolvedPhpDoc = $this->fileTypeMapper->getResolvedPhpDoc(
+				$scope->getFile(),
+				$scope->isInClass() ? $scope->getClassReflection()->getName() : null,
+				$scope->isInTrait() ? $scope->getTraitReflection()->getName() : null,
+				$function !== null ? $function->getName() : null,
+				$comment->getText(),
+			);
+
+			foreach ($resolvedPhpDoc->getVarTags() as $varTag) {
+				foreach ($varTag->getType()->getReferencedClasses() as $referencedClass) {
+					$this->addClassToDependencies($referencedClass, $dependenciesReflections);
+				}
+			}
+		}
 	}
 
 	/**
